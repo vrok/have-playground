@@ -12,7 +12,7 @@ trap cleanup EXIT SIGHUP SIGINT SIGTERM
 
 go install github.com/gopherjs/gopherjs/...
 
-go generate github.com/gopherjs/gopherjs.github.io/playground/internal/imports
+go generate github.com/vrok/have-playground/internal/imports
 
 # Build playground itself.
 gopherjs build -m

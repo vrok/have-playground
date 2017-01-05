@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/format"
 	"go/parser"
 	"go/scanner"
 	"go/token"
 	"go/types"
+	"path"
 	"strings"
 	"time"
 
@@ -15,6 +18,7 @@ import (
 	"github.com/gopherjs/gopherjs/compiler"
 	"github.com/gopherjs/gopherjs/js"
 	"github.com/neelance/go-angularjs"
+	"github.com/vrok/have/have"
 	"honnef.co/go/js/dom"
 	"honnef.co/go/js/xhr"
 )
@@ -23,7 +27,58 @@ type Line map[string]string
 
 var output []Line
 
-const snippetStoreHost = "snippets.gopherjs.org"
+//const snippetStoreHost = "snippets.gopherjs.org"
+const snippetStoreHost = "pkgz/"
+
+// Implements PkgLocator
+type pkgLocator struct {
+	snippet string
+}
+
+// Until we have a reliable Go to Have interoperabilit layer, we have to do this.
+var fakePkgs = []*struct {
+	name, code string
+}{
+	{
+		name: "fmt",
+		code: `package fmt
+func Printf(format string, a ...interface{}) (n int, err error) {}
+func Println(a ...interface{}) (n int, err error) {}`,
+	},
+}
+
+func (gpl *pkgLocator) Locate(relativePath string) ([]*have.File, error) {
+	if relativePath == "main" {
+		return []*have.File{have.NewFile("main.go", gpl.snippet)}, nil
+	}
+	for _, pkg := range fakePkgs {
+		if pkg.name == relativePath {
+			return []*have.File{have.NewFile(path.Join(relativePath, "main.go"), pkg.code)}, nil
+		}
+	}
+	return nil, fmt.Errorf("Couldn't find package %s (note that just a tiny subset of Go's std lib is available now)")
+}
+
+func haveToGo(haveCode string) (string, error) {
+	manager := have.NewPkgManager(&pkgLocator{snippet: haveCode})
+
+	pkg, errs := manager.Load("main")
+	if len(errs) > 0 {
+		err := errs[0]
+		if compErr, ok := err.(*have.CompileError); ok {
+			return "", errors.New(compErr.PrettyString(manager.Fset))
+		}
+		return "", err
+	}
+
+	for _, f := range pkg.Files {
+		if f.Name == have.BuiltinsFileName {
+			continue
+		}
+		return f.GenerateCode(), nil
+	}
+	return "", fmt.Errorf("Something went wrong!")
+}
 
 func main() {
 	var location = dom.GetWindow().Top().Location() // We might be inside an iframe, but want to use the location of topmost window.
@@ -54,7 +109,14 @@ func main() {
 				})
 			}()
 		} else {
-			scope.Set("code", "package main\n\nimport (\n\t\"fmt\"\n\n\t\"github.com/gopherjs/gopherjs/js\"\n)\n\nfunc main() {\n\tfmt.Println(\"Hello, playground\")\n\tjs.Global.Call(\"alert\", \"Hello, JavaScript\")\n\tprintln(\"Hello, JS console\")\n}\n")
+			scope.Set("code", `package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("Hello, playground")
+	print("Hello, JS console")
+}`)
 			close(codeReady)
 		}
 		scope.Set("imports", true)
@@ -124,7 +186,13 @@ func main() {
 			scope.Set("output", output)
 			pkgsToLoad = make(map[string]struct{})
 
-			file, err := parser.ParseFile(fileSet, "prog.go", []byte(scope.Get("code").String()), parser.ParseComments)
+			var goCode, err = haveToGo(scope.Get("code").String())
+			if err != nil {
+				scope.Set("output", []Line{Line{"type": "err", "content": err.Error()}})
+				return
+			}
+
+			file, err := parser.ParseFile(fileSet, "main.go", []byte(goCode), parser.ParseComments)
 			if err != nil {
 				if list, ok := err.(scanner.ErrorList); ok {
 					for _, entry := range list {
